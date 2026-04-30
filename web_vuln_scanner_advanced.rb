@@ -120,19 +120,45 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def add_finding(type, severity, message, owasp, evidence = {})
-    key = [type.to_s, severity.to_s, message.to_s, owasp.to_s].join('|')
+    type_s = utf8_clean(type.to_s)
+    severity_s = utf8_clean(severity.to_s)
+    message_s = utf8_clean(message.to_s)
+    owasp_s = utf8_clean(owasp.to_s)
+    evidence_h = deep_utf8(evidence)
+    key = [type_s, severity_s, message_s, owasp_s].join('|')
     return if @finding_keys[key]
 
-    confidence = confidence_from_evidence(evidence)
+    confidence = confidence_from_evidence(evidence_h)
     @finding_keys[key] = true
     @findings << {
-      type: type,
-      severity: severity,
-      message: message,
-      owasp: owasp,
+      type: type_s,
+      severity: severity_s,
+      message: message_s,
+      owasp: owasp_s,
       confidence: confidence,
-      evidence: evidence
+      evidence: evidence_h
     }
+  end
+
+  def utf8_clean(value)
+    s = value.to_s.dup
+    s.force_encoding('UTF-8')
+    s.encode('UTF-8', invalid: :replace, undef: :replace, replace: '?')
+  rescue
+    value.to_s.encode('UTF-8', invalid: :replace, undef: :replace, replace: '?')
+  end
+
+  def deep_utf8(obj)
+    case obj
+    when String
+      utf8_clean(obj)
+    when Array
+      obj.map { |v| deep_utf8(v) }
+    when Hash
+      obj.each_with_object({}) { |(k, v), h| h[deep_utf8(k)] = deep_utf8(v) }
+    else
+      obj
+    end
   end
 
   def confidence_from_evidence(evidence)
@@ -188,7 +214,7 @@ class MetasploitModule < Msf::Auxiliary
       if IO.select([sock], nil, nil, 1.0)
         data = sock.recv(512).to_s
         data = data.gsub(/[\r\n\t]+/, ' ').strip
-        return data[0, 220]
+        return utf8_clean(data[0, 220])
       end
     rescue
     end
@@ -1127,7 +1153,15 @@ class MetasploitModule < Msf::Auxiliary
     CSV.open(outfile, 'w') do |csv|
       csv << %w[Target Type Severity Confidence Message OWASP Evidence]
       @findings.each do |x|
-        csv << [ip, x[:type], x[:severity], x[:confidence], x[:message], x[:owasp], x[:evidence].to_json]
+        csv << [
+          utf8_clean(ip),
+          utf8_clean(x[:type]),
+          utf8_clean(x[:severity]),
+          utf8_clean(x[:confidence]),
+          utf8_clean(x[:message]),
+          utf8_clean(x[:owasp]),
+          deep_utf8(x[:evidence]).to_json
+        ]
       end
     end
     print_good("CSV report saved: #{outfile}")
@@ -1146,7 +1180,7 @@ class MetasploitModule < Msf::Auxiliary
       shodan: @shodan_data,
       findings: @findings
     }
-    File.write(outfile, JSON.pretty_generate(payload))
+    File.write(outfile, JSON.pretty_generate(deep_utf8(payload)))
     print_good("JSON report saved: #{outfile}")
   end
 
@@ -1179,6 +1213,6 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def h(value)
-    CGI.escapeHTML(value.to_s)
+    CGI.escapeHTML(utf8_clean(value))
   end
 end
