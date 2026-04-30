@@ -19,6 +19,7 @@ require 'timeout'
 require 'cgi'
 require 'uri'
 require 'net/http'
+require 'openssl'
 
 class MetasploitModule < Msf::Auxiliary
   include Msf::Exploit::Remote::HttpClient
@@ -28,7 +29,7 @@ class MetasploitModule < Msf::Auxiliary
     super(
       'Name' => 'Web Vulnerability Scanner Advanced',
       'Description' => 'Scans ports, headers, CORS, endpoints, and weak web exposures with evidence-rich reports',
-      'Author' => ['KingP "original came from some DR"'],
+      'Author' => ['Dhananjay DK', 'Codex Upgrade'],
       'License' => MSF_LICENSE
     )
 
@@ -52,6 +53,25 @@ class MetasploitModule < Msf::Auxiliary
         OptBool.new('PROBE_LFI', [true, 'Probe for path traversal/LFI patterns', true]),
         OptBool.new('PROBE_SQLI', [true, 'Probe for SQL injection patterns (GET/POST/headers)', true]),
         OptString.new('SQLI_LEVEL', [true, 'SQLi probe intensity: low|normal|aggressive', 'normal']),
+        OptBool.new('PROBE_SSTI', [true, 'Probe for SSTI patterns', true]),
+        OptBool.new('PROBE_SSRF', [true, 'Probe for SSRF patterns', true]),
+        OptBool.new('PROBE_CMDI', [true, 'Probe for command injection patterns', true]),
+        OptBool.new('PROBE_NOSQLI', [true, 'Probe for NoSQL injection patterns', true]),
+        OptBool.new('PROBE_XXE', [true, 'Probe for XXE patterns', true]),
+        OptBool.new('CHECK_SENSITIVE_FILES', [true, 'Check sensitive file exposure', true]),
+        OptBool.new('CHECK_BACKUP_FILES', [true, 'Check backup/old/temporary file variants', true]),
+        OptBool.new('CHECK_COOKIE_SECURITY', [true, 'Check Secure/HttpOnly/SameSite cookie flags', true]),
+        OptBool.new('CHECK_TLS', [true, 'Check TLS versions/ciphers/certificate validity', true]),
+        OptBool.new('CHECK_SECURITY_TXT', [true, 'Check /.well-known/security.txt', true]),
+        OptBool.new('CHECK_CORS_PREFLIGHT', [true, 'Check CORS preflight abuse patterns', true]),
+        OptBool.new('CHECK_CACHE_CONTROL', [true, 'Check sensitive endpoints for cacheable responses', true]),
+        OptBool.new('CHECK_WAF', [true, 'Probe and detect common WAF patterns', true]),
+        OptBool.new('CHECK_RESPONSE_FUZZING', [true, 'Fuzz malformed requests and detect verbose errors', true]),
+        OptBool.new('CHECK_OPEN_REDIRECT', [true, 'Probe open redirect parameters', true]),
+        OptBool.new('CHECK_SESSION_FIXATION', [false, 'Heuristic session fixation check on login flow', false]),
+        OptBool.new('PASSIVE_SUBDOMAIN_ENUM', [false, 'Passive subdomain discovery via crt.sh', false]),
+        OptBool.new('WAYBACK_ENUM', [false, 'Fetch historical paths from Wayback Machine CDX API', false]),
+        OptBool.new('CHECK_CSRF', [false, 'Heuristic CSRF token enforcement check', false]),
         OptBool.new('NVD_ENRICH', [false, 'Enrich findings with NVD CVE data', false]),
         OptString.new('NVD_API_KEY', [false, 'NVD API key (or use ENV NVD_API_KEY)', '']),
         OptBool.new('SHODAN_ENRICH', [false, 'Enrich target host with Shodan data', false]),
@@ -148,7 +168,6 @@ class MetasploitModule < Msf::Auxiliary
             banner = grab_banner(sock, ip, port)
             if banner && !banner.empty?
               @port_banners << { port: port, banner: banner }
-              vprint_status("#{ip} - Port #{port} banner: #{banner}")
               if banner =~ /openssh|apache|nginx|postgresql|mysql|redis|vsftpd|proftpd/i
                 add_finding('Service Banner Disclosure', 'Low', "Service banner exposed on port #{port}", 'A05 Security Misconfiguration', { port: port, banner: banner })
               end
@@ -189,16 +208,36 @@ class MetasploitModule < Msf::Auxiliary
       return
     end
 
+    base_uri = normalize_uri(datastore['TARGETURI'])
     print_good("#{ip} - HTTP #{res.code}")
     audit_headers(ip, res.headers)
+    check_cookie_security(ip, res) if datastore['CHECK_COOKIE_SECURITY']
     audit_server_fingerprint(ip, res.headers)
-    audit_cors(ip, normalize_uri(datastore['TARGETURI']))
-    check_http_methods(ip, normalize_uri(datastore['TARGETURI'])) if datastore['CHECK_TRACE']
+    check_security_txt(ip) if datastore['CHECK_SECURITY_TXT']
+    check_tls_posture(ip) if datastore['CHECK_TLS']
+    audit_cors(ip, base_uri)
+    check_http_methods(ip, base_uri) if datastore['CHECK_TRACE']
     discover_endpoints(ip)
     crawl_endpoints(ip) if datastore['CRAWL']
+    passive_subdomain_enum(ip) if datastore['PASSIVE_SUBDOMAIN_ENUM']
+    wayback_enum(ip) if datastore['WAYBACK_ENUM']
     run_reflected_xss_probes(ip) if datastore['PROBE_XSS']
     run_lfi_traversal_probes(ip) if datastore['PROBE_LFI']
     run_sqli_probes(ip) if datastore['PROBE_SQLI']
+    run_ssti_probes(ip) if datastore['PROBE_SSTI']
+    run_ssrf_probes(ip) if datastore['PROBE_SSRF']
+    run_cmdi_probes(ip) if datastore['PROBE_CMDI']
+    run_nosqli_probes(ip) if datastore['PROBE_NOSQLI']
+    run_xxe_probes(ip) if datastore['PROBE_XXE']
+    check_sensitive_files(ip) if datastore['CHECK_SENSITIVE_FILES']
+    check_backup_file_variants(ip) if datastore['CHECK_BACKUP_FILES']
+    check_cors_preflight(ip, base_uri) if datastore['CHECK_CORS_PREFLIGHT']
+    check_cache_control(ip) if datastore['CHECK_CACHE_CONTROL']
+    detect_waf(ip, base_uri) if datastore['CHECK_WAF']
+    check_response_fuzzing(ip, base_uri) if datastore['CHECK_RESPONSE_FUZZING']
+    check_open_redirect(ip) if datastore['CHECK_OPEN_REDIRECT']
+    check_session_fixation(ip) if datastore['CHECK_SESSION_FIXATION']
+    check_csrf_enforcement(ip) if datastore['CHECK_CSRF']
   rescue ::Exception => e
     print_error("#{ip} - #{e.class}: #{e}")
   end
@@ -209,6 +248,7 @@ class MetasploitModule < Msf::Auxiliary
     check_header(ip, h, 'Strict-Transport-Security', 'High', 'Missing HSTS may allow downgrade attacks', 'A02 Cryptographic Failures')
     check_header(ip, h, 'X-Frame-Options', 'Medium', 'Missing clickjacking protection', 'A05 Security Misconfiguration')
     check_header(ip, h, 'X-Content-Type-Options', 'Medium', 'Missing MIME sniffing protection', 'A05 Security Misconfiguration')
+    check_header(ip, h, 'X-XSS-Protection', 'Low', 'Missing X-XSS-Protection header', 'A05 Security Misconfiguration')
     check_header(ip, h, 'Referrer-Policy', 'Low', 'Sensitive URLs may leak', 'A01 Broken Access Control')
     check_header(ip, h, 'Permissions-Policy', 'Low', 'Browser features overexposed', 'A05 Security Misconfiguration')
 
@@ -221,6 +261,11 @@ class MetasploitModule < Msf::Auxiliary
     xfo = h['X-Frame-Options'].to_s
     if !xfo.empty? && !(xfo.casecmp('DENY').zero? || xfo.casecmp('SAMEORIGIN').zero?)
       add_finding('X-Frame-Options', 'Low', "Unexpected X-Frame-Options value: #{xfo}", 'A05 Security Misconfiguration', { value: xfo })
+    end
+
+    xcto = h['X-Content-Type-Options'].to_s
+    if !xcto.empty? && xcto.downcase != 'nosniff'
+      add_finding('X-Content-Type-Options', 'Low', "Unexpected X-Content-Type-Options value: #{xcto}", 'A05 Security Misconfiguration', { value: xcto })
     end
   end
 
@@ -289,6 +334,330 @@ class MetasploitModule < Msf::Auxiliary
     if allow =~ /\bPUT\b|\bDELETE\b/i
       add_finding('HTTP Methods', 'Medium', "Potentially risky methods allowed: #{allow}", 'A05 Security Misconfiguration', { allow: allow })
     end
+  rescue
+  end
+
+  def check_tls_posture(ip)
+    return unless datastore['SSL']
+    begin
+      tcp = TCPSocket.new(ip, datastore['RPORT'].to_i)
+      ssl = OpenSSL::SSL::SSLSocket.new(tcp, OpenSSL::SSL::SSLContext.new)
+      ssl.hostname = ip if ssl.respond_to?(:hostname=)
+      ssl.connect
+      cert = ssl.peer_cert
+      proto = ssl.ssl_version.to_s
+      cipher = ssl.cipher&.first.to_s
+
+      if cert
+        if cert.not_after < Time.now
+          add_finding('TLS Certificate', 'High', 'TLS certificate is expired', 'A02 Cryptographic Failures', { expires_at: cert.not_after.to_s })
+        elsif cert.not_after < Time.now + (14 * 24 * 3600)
+          add_finding('TLS Certificate', 'Medium', 'TLS certificate expires within 14 days', 'A02 Cryptographic Failures', { expires_at: cert.not_after.to_s })
+        end
+      end
+      if proto =~ /TLSv1(\.0|\.1)?/i
+        add_finding('TLS Version', 'High', "Legacy TLS version in use: #{proto}", 'A02 Cryptographic Failures', { protocol: proto, cipher: cipher })
+      end
+      if cipher =~ /RC4|3DES|DES|NULL|MD5/i
+        add_finding('TLS Cipher', 'High', "Weak TLS cipher negotiated: #{cipher}", 'A02 Cryptographic Failures', { protocol: proto, cipher: cipher })
+      end
+      ssl.close rescue nil
+      tcp.close rescue nil
+    rescue
+    end
+  end
+
+  def check_cookie_security(ip, res)
+    raw = res.headers['Set-Cookie'].to_s
+    return if raw.empty?
+    cookies = raw.split(/\n|,\s*(?=[^;]+=)/).map(&:strip).reject(&:empty?)
+    cookies.each do |cookie|
+      flags = cookie.downcase
+      add_finding('Cookie Security', 'Medium', 'Cookie missing Secure flag', 'A05 Security Misconfiguration', { cookie: cookie[0, 120] }) unless flags.include?('secure')
+      add_finding('Cookie Security', 'Medium', 'Cookie missing HttpOnly flag', 'A05 Security Misconfiguration', { cookie: cookie[0, 120] }) unless flags.include?('httponly')
+      add_finding('Cookie Security', 'Low', 'Cookie missing SameSite attribute', 'A05 Security Misconfiguration', { cookie: cookie[0, 120] }) unless flags.include?('samesite')
+    end
+  end
+
+  def check_security_txt(ip)
+    r = send_request_cgi({ 'uri' => '/.well-known/security.txt', 'method' => 'GET' }, datastore['TIMEOUT'])
+    return if r.nil?
+    if r.code.to_i == 200
+      body = r.body.to_s
+      contacts = body.scan(/^Contact:\s*(.+)$/i).flatten
+      add_finding('security.txt', 'Low', "security.txt discovered (contacts: #{contacts.length})", 'A05 Security Misconfiguration', { contacts: contacts.take(5), snippet: body[0, 240] })
+    else
+      add_finding('security.txt', 'Low', 'security.txt not found', 'A05 Security Misconfiguration', { status: r.code })
+    end
+  rescue
+  end
+
+  def check_sensitive_files(ip)
+    paths = %w[/.git/config /.env /.DS_Store /phpinfo.php /server-status /web.config /backup/ /config.php.bak]
+    paths.each do |path|
+      begin
+        r = send_request_cgi({ 'uri' => path, 'method' => 'GET' }, datastore['TIMEOUT'])
+        next if r.nil?
+        if [200, 206].include?(r.code.to_i)
+          add_finding('Sensitive File Exposure', 'High', "Sensitive path accessible: #{path}", 'A05 Security Misconfiguration', { path: path, status: r.code })
+        end
+      rescue
+      end
+    end
+  end
+
+  def check_backup_file_variants(ip)
+    suffixes = %w[.bak .old .backup .save ~ .swp .swo .orig .copy .back]
+    targets = @endpoints.map { |e| e[:path].to_s }.select { |p| p.start_with?('/') }.take(80)
+    targets << normalize_uri(datastore['TARGETURI'])
+    targets.uniq.each do |path|
+      suffixes.each do |suf|
+        begin
+          candidate = "#{path}#{suf}"
+          r = send_request_cgi({ 'uri' => candidate, 'method' => 'GET' }, datastore['TIMEOUT'])
+          next if r.nil?
+          if [200, 206].include?(r.code.to_i)
+            add_finding('Backup File Exposure', 'High', "Backup/temporary file exposed: #{candidate}", 'A05 Security Misconfiguration', { path: candidate, status: r.code })
+          end
+        rescue
+        end
+      end
+    end
+  end
+
+  def run_ssti_probes(ip)
+    payloads = ['{{7*7}}', '${7*7}', '<%= 7*7 %>']
+    probe_candidates.each do |path|
+      payloads.each do |pl|
+        begin
+          baseline = fetch_baseline_signature(path)
+          r = send_request_cgi({ 'uri' => path, 'method' => 'GET', 'vars_get' => { 'q' => pl, 'name' => pl } }, datastore['TIMEOUT'])
+          next if r.nil?
+          b = r.body.to_s
+          next unless b.include?('49') || b.include?('343')
+          next unless significant_response_shift?(baseline, r)
+          sc, dc, ld = response_shift_metrics(baseline, r)
+          add_finding('SSTI (Potential)', 'High', "Template expression appears evaluated at #{path}", 'A03 Injection', { path: path, payload: pl, status: r.code, snippet: b[0, 240], status_changed: sc, digest_changed: dc, len_delta: ld })
+          break
+        rescue
+        end
+      end
+    end
+  end
+
+  def run_ssrf_probes(ip)
+    payload = 'http://169.254.169.254/latest/meta-data/'
+    probe_candidates.each do |path|
+      begin
+        r = send_request_cgi({ 'uri' => path, 'method' => 'GET', 'vars_get' => { 'url' => payload, 'next' => payload, 'dest' => payload } }, datastore['TIMEOUT'])
+        next if r.nil?
+        b = r.body.to_s
+        if b =~ /ami-id|instance-id|meta-data|ec2/i
+          add_finding('SSRF (Potential)', 'Critical', "Cloud metadata marker found at #{path}", 'A10 Server-Side Request Forgery', { path: path, payload: payload, status: r.code, snippet: b[0, 240] })
+        end
+      rescue
+      end
+    end
+  end
+
+  def run_cmdi_probes(ip)
+    payloads = [';id', '`id`', '$(id)']
+    probe_candidates.each do |path|
+      payloads.each do |pl|
+        begin
+          r = send_request_cgi({ 'uri' => path, 'method' => 'GET', 'vars_get' => { 'cmd' => pl, 'exec' => pl } }, datastore['TIMEOUT'])
+          next if r.nil?
+          b = r.body.to_s
+          if b =~ /uid=\d+\(.+\)\s+gid=\d+/i
+            add_finding('Command Injection (Potential)', 'Critical', "Command output marker observed at #{path}", 'A03 Injection', { path: path, payload: pl, status: r.code, snippet: b[0, 240] })
+            break
+          end
+        rescue
+        end
+      end
+    end
+  end
+
+  def run_nosqli_probes(ip)
+    payloads = ['{"$gt":""}', '{"$ne":null}']
+    probe_candidates.each do |path|
+      payloads.each do |pl|
+        begin
+          r = send_request_cgi({ 'uri' => path, 'method' => 'POST', 'ctype' => 'application/json', 'data' => "{\"username\":#{pl},\"password\":#{pl}}" }, datastore['TIMEOUT'])
+          next if r.nil?
+          b = r.body.to_s
+          if b =~ /mongo|mongodb|\$gt|\$ne|bson|nosql/i
+            add_finding('NoSQL Injection (Potential)', 'High', "NoSQL-related marker observed at #{path}", 'A03 Injection', { path: path, payload: pl, status: r.code, snippet: b[0, 240] })
+            break
+          end
+        rescue
+        end
+      end
+    end
+  end
+
+  def run_xxe_probes(ip)
+    payload = '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+    probe_candidates.each do |path|
+      begin
+        r = send_request_cgi({ 'uri' => path, 'method' => 'POST', 'ctype' => 'application/xml', 'data' => payload }, datastore['TIMEOUT'])
+        next if r.nil?
+        b = r.body.to_s
+        if b =~ /root:.*:0:0:/i || b =~ /xml parser|entity/i
+          add_finding('XXE (Potential)', 'High', "XXE marker observed at #{path}", 'A05 Security Misconfiguration', { path: path, status: r.code, snippet: b[0, 240] })
+        end
+      rescue
+      end
+    end
+  end
+
+  def check_cors_preflight(ip, base_uri)
+    r = send_request_cgi(
+      {
+        'uri' => base_uri,
+        'method' => 'OPTIONS',
+        'headers' => {
+          'Origin' => 'https://evil.example',
+          'Access-Control-Request-Method' => 'POST',
+          'Access-Control-Request-Headers' => 'authorization,x-api-key'
+        }
+      }, datastore['TIMEOUT']
+    )
+    return if r.nil?
+    acao = r.headers['Access-Control-Allow-Origin'].to_s
+    acah = r.headers['Access-Control-Allow-Headers'].to_s
+    if acao == '*' && acah =~ /authorization|x-api-key/i
+      add_finding('CORS Preflight', 'High', 'Permissive preflight allows sensitive headers from any origin', 'A05 Security Misconfiguration', { acao: acao, acah: acah })
+    end
+  rescue
+  end
+
+  def check_cache_control(ip)
+    sensitive = probe_candidates.select { |p| p =~ /login|account|profile|admin|checkout|order|cart/i }.take(30)
+    sensitive.each do |path|
+      begin
+        r = send_request_cgi({ 'uri' => path, 'method' => 'GET' }, datastore['TIMEOUT'])
+        next if r.nil?
+        cc = r.headers['Cache-Control'].to_s.downcase
+        unless cc.include?('no-store') || cc.include?('private')
+          add_finding('Cache-Control', 'Medium', 'Sensitive endpoint appears cacheable', 'A05 Security Misconfiguration', { path: path, cache_control: r.headers['Cache-Control'] })
+        end
+      rescue
+      end
+    end
+  end
+
+  def detect_waf(ip, base_uri)
+    r = send_request_cgi({ 'uri' => base_uri, 'method' => 'GET', 'vars_get' => { 'q' => "<script>alert(1)</script>' OR 1=1--" } }, datastore['TIMEOUT'])
+    return if r.nil?
+    h = r.headers || {}
+    b = r.body.to_s.downcase
+    waf = nil
+    waf = 'Cloudflare' if h['CF-RAY'] || h['Server'].to_s =~ /cloudflare/i
+    waf = 'AWS WAF' if h['x-amzn-waf'] || b =~ /aws waf/i
+    waf = 'ModSecurity' if b =~ /mod_security|modsecurity|not acceptable/
+    waf = 'F5 BIG-IP' if h['Server'].to_s =~ /big-ip/i
+    waf = 'Generic WAF' if waf.nil? && r.code.to_i == 403 && b =~ /request rejected|blocked|firewall|security/
+    add_finding('WAF Detected', 'Low', "Web Application Firewall detected: #{waf}", 'A05 Security Misconfiguration', { waf: waf }) if waf
+  rescue
+  end
+
+  def check_response_fuzzing(ip, base_uri)
+    fuzz = 'A' * 4096 + "%00%0d%0a<>'\""
+    r = send_request_cgi({ 'uri' => base_uri, 'method' => 'GET', 'vars_get' => { 'q' => fuzz } }, datastore['TIMEOUT'])
+    return if r.nil?
+    b = r.body.to_s
+    if b =~ /stack trace|exception|traceback|fatal error|warning:\s/i
+      add_finding('Response Fuzzing', 'Medium', 'Malformed input triggered verbose error leakage', 'A05 Security Misconfiguration', { status: r.code, snippet: b[0, 260] })
+    end
+  rescue
+  end
+
+  def check_open_redirect(ip)
+    payload = 'https://evil.example'
+    keys = %w[redirect next url return returnTo continue dest]
+    probe_candidates.each do |path|
+      keys.each do |k|
+        begin
+          r = send_request_cgi({ 'uri' => path, 'method' => 'GET', 'vars_get' => { k => payload } }, datastore['TIMEOUT'])
+          next if r.nil?
+          loc = r.headers['Location'].to_s
+          if [301, 302, 303, 307, 308].include?(r.code.to_i) && loc.start_with?(payload)
+            add_finding('Open Redirect', 'Medium', "Open redirect via parameter #{k} at #{path}", 'A01 Broken Access Control', { path: path, parameter: k, location: loc })
+            break
+          end
+        rescue
+        end
+      end
+    end
+  end
+
+  def check_session_fixation(ip)
+    login_path = '/login'
+    before = send_request_cgi({ 'uri' => login_path, 'method' => 'GET' }, datastore['TIMEOUT'])
+    return if before.nil?
+    cookie_before = before.headers['Set-Cookie'].to_s
+    after = send_request_cgi({ 'uri' => login_path, 'method' => 'POST', 'vars_post' => { 'username' => 'test', 'password' => 'test' } }, datastore['TIMEOUT'])
+    return if after.nil?
+    cookie_after = after.headers['Set-Cookie'].to_s
+    return if cookie_before.empty? || cookie_after.empty?
+    if cookie_before == cookie_after
+      add_finding('Session Fixation (Potential)', 'Medium', 'Session cookie did not change after auth attempt', 'A07 Identification and Authentication Failures', { path: login_path })
+    end
+  rescue
+  end
+
+  def check_csrf_enforcement(ip)
+    candidates = probe_candidates.select { |p| p =~ /profile|account|settings|email|password|checkout|cart/i }.take(20)
+    candidates.each do |path|
+      begin
+        r = send_request_cgi({ 'uri' => path, 'method' => 'POST', 'vars_post' => { 'x' => '1' } }, datastore['TIMEOUT'])
+        next if r.nil?
+        body = r.body.to_s.downcase
+        if [200, 302].include?(r.code.to_i) && !(body.include?('csrf') || body.include?('token'))
+          add_finding('CSRF Protection (Potential)', 'Medium', "State-changing endpoint may not enforce CSRF token: #{path}", 'A01 Broken Access Control', { path: path, status: r.code })
+        end
+      rescue
+      end
+    end
+  end
+
+  def passive_subdomain_enum(ip)
+    base = ip.to_s.downcase.strip
+    return if base.empty?
+    url = URI("https://crt.sh/?q=%25.#{base}&output=json")
+    res = Net::HTTP.get_response(url)
+    return unless res.is_a?(Net::HTTPSuccess)
+    rows = JSON.parse(res.body) rescue []
+    return unless rows.is_a?(Array)
+    names = rows.map { |r| r['name_value'].to_s }.flat_map { |v| v.split(/\s+/) }.map(&:strip).select { |d| d.end_with?(base) }.uniq.take(200)
+    names.each do |n|
+      @endpoints << { path: "https://#{n}", code: 0 } unless @endpoints.any? { |e| e[:path] == "https://#{n}" }
+    end
+    add_finding('Passive Subdomain Discovery', 'Low', "crt.sh returned #{names.length} related hostnames", 'A05 Security Misconfiguration', { sample: names.take(20) }) if names.any?
+  rescue
+  end
+
+  def wayback_enum(ip)
+    host = ip.to_s.downcase.strip
+    return if host.empty?
+    url = URI("https://web.archive.org/cdx/search/cdx?url=#{host}/*&output=json&fl=original&collapse=urlkey")
+    res = Net::HTTP.get_response(url)
+    return unless res.is_a?(Net::HTTPSuccess)
+    rows = JSON.parse(res.body) rescue []
+    return unless rows.is_a?(Array) && rows.length > 1
+    rows[1..250].each do |row|
+      next unless row.is_a?(Array) && row[0]
+      begin
+        u = URI.parse(row[0].to_s)
+        next unless u.path
+        path = u.path
+        path += "?#{u.query}" if u.query && !u.query.empty?
+        @endpoints << { path: path, code: 0 } unless @endpoints.any? { |e| e[:path] == path }
+      rescue
+      end
+    end
+    add_finding('Wayback Discovery', 'Low', 'Historical endpoints added from Wayback CDX', 'A05 Security Misconfiguration', { total_endpoints: @endpoints.length })
   rescue
   end
 
@@ -792,6 +1161,11 @@ class MetasploitModule < Msf::Auxiliary
     html << "<style>body{font-family:Arial,sans-serif;background:#f3f6fb;color:#1f2937} .wrap{max-width:1200px;margin:20px auto;padding:0 12px} .card{background:#fff;border-radius:10px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.08)} table{width:100%;border-collapse:collapse} th,td{border-bottom:1px solid #e5e7eb;padding:10px;text-align:left} .badge-low{background:#dcfce7;color:#166534;padding:3px 8px;border-radius:999px} .badge-medium{background:#fef3c7;color:#92400e;padding:3px 8px;border-radius:999px} .badge-high{background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:999px}</style></head><body><div class='wrap'>"
     html << "<div class='card'><h1>Web Vulnerability Scanner Advanced</h1><p><b>Target:</b> #{h(ip)}<br><b>Date:</b> #{h(Time.now.to_s)}<br><b>Score:</b> #{score}/100 <span class='#{risk_class}'>#{risk}</span></p></div>"
     html << "<div class='card'><h2>Open Ports</h2><p>#{h(@open_ports.sort.join(', '))}</p></div>"
+    if @port_banners.any?
+      html << "<div class='card'><h2>Service Banners</h2><ul>"
+      @port_banners.each { |b| html << "<li>#{h(b[:port].to_s)}: #{h(b[:banner].to_s)}</li>" }
+      html << "</ul></div>"
+    end
     html << "<div class='card'><h2>Discovered Endpoints</h2><ul>"
     @endpoints.each { |e| html << "<li>#{h(e[:path])} -> HTTP #{h(e[:code].to_s)}</li>" }
     html << "</ul></div>"
