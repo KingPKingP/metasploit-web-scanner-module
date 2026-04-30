@@ -11,7 +11,7 @@ Copy the module to your local MSF module path:
 
 ```bash
 mkdir -p ~/.msf4/modules/auxiliary/scanner/http
-cp /home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/
+cp /home/god/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/
 chmod 644 ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
 ```
 
@@ -123,7 +123,7 @@ You are likely running an old module copy.
 Fix:
 
 ```bash
-cp /home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
+cp /home/god/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
 ```
 
 Verify:
