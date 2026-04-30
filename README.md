@@ -3,7 +3,7 @@
 Advanced Metasploit auxiliary scanner for web assessment with structured reporting, probe orchestration, enrichment, and triage-friendly findings.
 
 - Module path: `auxiliary/scanner/http/web_vuln_scanner_advanced`
-- Source file: `/home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb`
+- Source file: `/root/web_vuln_scanner_advanced.rb`
 
 ## Features
 
@@ -34,7 +34,7 @@ Advanced Metasploit auxiliary scanner for web assessment with structured reporti
 
 ```bash
 mkdir -p ~/.msf4/modules/auxiliary/scanner/http
-cp /home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/
+cp /root/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/
 chmod 644 ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
 ```
 
@@ -215,7 +215,7 @@ Includes:
 Old module copy loaded by Metasploit.
 
 ```bash
-cp /home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
+cp /root/web_vuln_scanner_advanced.rb ~/.msf4/modules/auxiliary/scanner/http/web_vuln_scanner_advanced.rb
 ```
 
 Then in `msfconsole`:
