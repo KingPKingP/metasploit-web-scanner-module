@@ -28,7 +28,7 @@ class MetasploitModule < Msf::Auxiliary
     super(
       'Name' => 'Web Vulnerability Scanner Advanced',
       'Description' => 'Scans ports, headers, CORS, endpoints, and weak web exposures with evidence-rich reports',
-      'Author' => ['KingP'],
+      'Author' => ['KingP "original came from some DR"'],
       'License' => MSF_LICENSE
     )
 
