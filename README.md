@@ -3,7 +3,7 @@
 This guide is for the module:
 
 - `auxiliary/scanner/http/web_vuln_scanner_advanced`
-- source file: `/home/god/tools/AI_ramverk/web_vuln_scanner_advanced.rb`
+- source file: `/home/god/web_vuln_scanner_advanced.rb`
 
 ## 1) Install in Metasploit
 
