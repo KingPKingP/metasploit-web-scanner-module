@@ -1,15 +1,6 @@
 ##
 # Web Vulnerability Scanner Advanced
 # Metasploit Auxiliary Module
-#
-# Upgraded from a baseline scanner:
-# - Threaded endpoint discovery
-# - Header value quality checks (not only presence)
-# - Additional weak-config checks
-# - CORS reflection checks with custom Origin
-# - Finding dedupe + evidence fields
-# - Safer HTML escaping in reports
-# - JSON export includes metadata and endpoint evidence
 ##
 
 require 'json'
@@ -20,6 +11,7 @@ require 'cgi'
 require 'uri'
 require 'net/http'
 require 'openssl'
+require 'digest'
 
 class MetasploitModule < Msf::Auxiliary
   include Msf::Exploit::Remote::HttpClient
@@ -176,6 +168,34 @@ class MetasploitModule < Msf::Auxiliary
     return 'high' if score >= 4
     return 'medium' if score >= 2
     'low'
+  end
+
+  def generic_forbidden_signature
+    begin
+      random_path = "/#{Rex::Text.rand_text_alphanumeric(18).downcase}_#{Rex::Text.rand_text_alphanumeric(6).downcase}"
+      r = send_request_cgi({ 'uri' => random_path, 'method' => 'GET' }, datastore['TIMEOUT'])
+      return nil if r.nil? || r.code.to_i != 403
+      body = r.body.to_s
+      {
+        code: 403,
+        digest: Digest::SHA256.hexdigest(body[0, 4096]),
+        body_len: body.length
+      }
+    rescue
+      nil
+    end
+  end
+
+  def generic_forbidden_match?(response, signature)
+    return false unless response && signature
+    return false unless response.code.to_i == 403
+    body = response.body.to_s
+    digest = Digest::SHA256.hexdigest(body[0, 4096])
+    same_digest = digest == signature[:digest]
+    len_close = (body.length - signature[:body_len].to_i).abs <= 40
+    same_digest || len_close
+  rescue
+    false
   end
 
   def scan_ports(ip)
@@ -699,6 +719,8 @@ class MetasploitModule < Msf::Auxiliary
     mutex = ::Mutex.new
     queue = paths.dup
     max_threads = [datastore['THREADS'].to_i, 1].max
+    forbidden_signature = generic_forbidden_signature
+    vprint_status("#{ip} - Generic 403 baseline detected, suppressing synthetic 403 hits") if forbidden_signature
 
     max_threads.times do
       threads << framework.threads.spawn("endpoint-discovery-#{ip}", false) do
@@ -711,14 +733,17 @@ class MetasploitModule < Msf::Auxiliary
             r = send_request_cgi({ 'uri' => path, 'method' => 'GET' }, 5)
             next if r.nil?
             code = r.code.to_i
-            next unless [200, 201, 204, 301, 302, 307, 308, 401, 403].include?(code)
+            # Treat generic 403 blocks as non-findings to avoid noisy false positives.
+            next unless [200, 201, 204, 301, 302, 307, 308, 401].include?(code)
+            next if generic_forbidden_match?(r, forbidden_signature)
 
             mutex.synchronize do
               @endpoints << { path: path, code: code }
             end
             vprint_good("#{ip} - Found #{path} (#{code})")
 
-            if %w[/swagger /swagger-ui /api-docs /v2/api-docs /openapi.json /actuator /actuator/health /.env /.git/config /phpinfo.php /server-status].include?(path)
+            if [200, 201, 204, 301, 302, 307, 308].include?(code) &&
+               %w[/swagger /swagger-ui /api-docs /v2/api-docs /openapi.json /actuator /actuator/health /.env /.git/config /phpinfo.php /server-status].include?(path)
               add_finding('Endpoint Exposure', 'Medium', "#{path} accessible (#{code})", 'A05 Security Misconfiguration', { path: path, code: code })
             end
           rescue
@@ -739,6 +764,7 @@ class MetasploitModule < Msf::Auxiliary
     queue = [[seed, 0]]
     visited = {}
     discovered = 0
+    forbidden_signature = generic_forbidden_signature
 
     while !queue.empty? && visited.length < max_pages
       path, depth = queue.shift
@@ -748,6 +774,7 @@ class MetasploitModule < Msf::Auxiliary
       begin
         res = send_request_cgi({ 'uri' => path, 'method' => 'GET' }, datastore['TIMEOUT'])
         next if res.nil?
+        next if generic_forbidden_match?(res, forbidden_signature)
         code = res.code.to_i
         body = res.body.to_s
         unless @endpoints.any? { |e| e[:path] == path }
